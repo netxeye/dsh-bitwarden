@@ -1,0 +1,283 @@
+#!/bin/bash
+# Build / prepare @dsh-external/dsh-bitwarden.
+#
+# The plugin ships plain ESM JavaScript (no TypeScript step): Node runs lib/
+# directly. What this script does:
+#   1. Links the peer dependencies the plugin imports at runtime
+#      (@deepseek-ai/dsh-tools, @deepseek-ai/schemastery). The DSH loader
+#      resolves symlinked plugin directories to their real path, so the plugin
+#      needs its own node_modules rather than the profile's.
+#   2. Syntax-checks every source file.
+#   3. Best-effort install of the optional `hash-wasm` dependency, which adds
+#      Argon2id KDF support (accounts whose KDF is Argon2id).
+#   4. Runs the offline end-to-end test suite against a mock server.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+# ── dependency roots ─────────────────────────────────────────────────────────
+DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
+CANDIDATES=(
+  "$DSH_HOME_DIR/profiles/node_modules"
+  "$DSH_HOME_DIR/profiles/web/node_modules"
+  "/home/tinyog/.dsh-runtime/lib/node_modules/@deepseek-ai/dsh/node_modules"
+  "/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules"
+)
+DEP_ROOT=""
+for candidate in "${CANDIDATES[@]}"; do
+  if [ -d "$candidate/@deepseek-ai/dsh-tools" ] && [ -d "$candidate/@deepseek-ai/schemastery" ]; then
+    DEP_ROOT="$candidate"
+    break
+  fi
+done
+if [ -z "$DEP_ROOT" ]; then
+  echo "build: cannot locate @deepseek-ai/dsh-tools / @deepseek-ai/schemastery" >&2
+  exit 1
+fi
+echo "=== dependency root: $DEP_ROOT ==="
+
+link_pkg() {
+  local name="$1"
+  node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const [link, target] = process.argv.slice(1);
+    if (!fs.existsSync(target)) { console.error(`build: missing dependency target ${target}`); process.exit(1); }
+    fs.rmSync(link, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    fs.symlinkSync(path.resolve(target), path.resolve(link), process.platform === "win32" ? "junction" : "dir");
+  ' "node_modules/$name" "$DEP_ROOT/$name"
+}
+
+# dsh-llm used to ride along here, but nothing in lib/ imports it and the
+# manifest never declared it — a symlink to nothing only misleads maintainers.
+PEERS="@deepseek-ai/dsh-tools @deepseek-ai/dsh-typert-protocol @deepseek-ai/schemastery"
+
+for pkg in $PEERS; do
+  link_pkg "$pkg"
+  echo "  linked $pkg"
+done
+
+# npm prunes symlinks it did not create, so every npm invocation in this script
+# has to be followed by a re-link — and by a re-link of the *whole* peer list.
+# Re-linking a hand-written subset is how `npm install hash-wasm` used to leave
+# the tree unable to resolve @deepseek-ai/dsh-typert-protocol in a fresh clone.
+relink_peers() {
+  for pkg in $PEERS; do link_pkg "$pkg" >/dev/null; done
+}
+
+# ── stamp the build identity into the browser bundle ────────────────────────
+# The heading shows the version and the repo. A browser bundle cannot read
+# package.json, and asking the host for it means changing the node half — which
+# only takes effect after a restart. Stamping the values in here closes that
+# gap and keeps the fallback from ever being hand-maintained: both literals are
+# rewritten from package.json on every build, idempotently.
+echo "=== stamp build identity ==="
+node scripts/stamp-build.mjs
+
+# ── syntax check ─────────────────────────────────────────────────────────────
+echo "=== syntax check ==="
+for file in lib/*.js test/*.mjs; do
+  node --check "$file"
+  echo "  ok $file"
+done
+
+# ── optional Argon2id support ────────────────────────────────────────────────
+# NOTE: `--legacy-peer-deps` keeps npm from auto-installing the *registry* copies
+# of the @deepseek-ai peer packages, which would shadow the running host's
+# versions. If any npm command runs anyway, re-link below restores them.
+if [ -d node_modules/hash-wasm ]; then
+  echo "=== hash-wasm present (Argon2id supported) ==="
+else
+  echo "=== installing optional hash-wasm (Argon2id support; failures are non-fatal) ==="
+  npm install --no-save --no-audit --no-fund --loglevel=error --legacy-peer-deps hash-wasm || \
+    echo "  (skipped: PBKDF2 accounts still work; Argon2id accounts will report a clear error)"
+  relink_peers
+  echo "  re-linked host peer packages after npm install"
+fi
+
+# ── tests ────────────────────────────────────────────────────────────────────
+if [ "${SKIP_TESTS:-0}" != "1" ]; then
+  # Manifest guard: every declared peer range must admit the harness builds
+  # that are published on npm. npm applies the prerelease rule strictly, so a
+  # range without explicit prerelease branches breaks `npm install` (the
+  # marketplace fallback path) even though the loader accepts it.
+  echo "=== peer range test (manifest vs published harness builds) ==="
+  node test/peer-ranges.test.mjs
+
+  echo "=== offline end-to-end test (mock Vaultwarden) ==="
+  node test/mock-e2e.test.mjs
+
+  # Official Bitwarden cloud only accepts its own client names in the
+  # bitwarden-client-name header; an unknown name is answered with an empty
+  # HTTP 429 that is not a rate limit. Keep the wire identity pinned.
+  echo "=== Bitwarden client-name contract test (official cloud whitelist) ==="
+  node test/client-name.test.mjs
+
+  # KDF units and pinned vectors. This one exists because the mock server below
+  # used to repeat the client's own MiB/KiB mistake, so the end-to-end suite
+  # agreed with a broken client and could never catch it.
+  echo "=== KDF unit + known-vector test ==="
+  node test/kdf-units.test.mjs
+
+  echo "=== live sync test (WebSocket notifications) ==="
+  node test/live-sync.test.mjs
+
+  # The on-disk vault cache: gzip envelope, 0600 atomic write, account checks,
+  # the 7-day trust window, and the revision-date fast path that lets a warm
+  # start skip the download entirely.
+  echo "=== vault cache test (revision probe fast path) ==="
+  node test/cache-store.test.mjs
+
+  echo "=== cipher write-back test ==="
+  node test/mutations.test.mjs
+
+  # The P0/P1 regressions: trash vs permanent delete endpoints, optimistic
+  # concurrency, folder tri-state, and "a write must not drop a field it did
+  # not touch". These exist because the mock used to share the plugin's own
+  # mistake, so the older suite could stay green through both.
+  echo "=== write-back regression test (trash / concurrency / field preservation) ==="
+  node test/write-back.test.mjs
+
+  # Passkeys: decryption of login.fido2Credentials, the gated export (private
+  # key to a 0600 file), and the import/remove write path that must not reset
+  # the entry's own fields.
+  echo "=== passkey vault test (metadata / gated export / import) ==="
+  node test/passkey.test.mjs
+
+  echo "=== passkey docs contract test (multi-client recipe) ==="
+  node test/passkey-docs.test.mjs
+
+  if [ -n "${EGO_BROWSER_BIN:-}" ]; then
+    echo "=== ego WebAuthn integration test ==="
+    node test/ego-webauthn.integration.mjs
+  else
+    echo "=== ego WebAuthn integration test (skipped: EGO_BROWSER_BIN not set) ==="
+  fi
+
+  # The on-disk privacy contract every record obeys: exclusive-create temp path
+  # (a wider file already sitting there is never reused), 0600 carried by the
+  # fresh inode instead of a chmod afterwards, no predictable temp name, and a
+  # clean failure that leaves neither debris nor a half-written record.
+  echo "=== atomic file privacy test ==="
+  node test/atomic-file.test.mjs
+
+  # Host-entry smoke test: imports lib/index.js and runs apply() against a fake
+  # host context, so a broken Config schema or registration path fails here
+  # instead of at startup.
+  echo "=== host entry smoke test ==="
+  node test/host-entry.test.mjs
+
+  # Sign-in flow through the RPC gateway: wrong password, two-factor
+  # challenge, code retry, and the write/restart ordering rules.
+  echo "=== gateway sign-in flow test ==="
+  node test/gateway-flow.test.mjs
+
+  # Permission tiers: readonly refuses, ask routes through the approval seam,
+  # auto writes straight through.
+  echo "=== access mode tier test ==="
+  node test/access-mode.test.mjs
+
+  # Placeholder masking: the model-facing half of the privacy contract. It sits
+  # in the build rather than in "remember to run it" because a break here is
+  # silent in the worst direction — the placeholder is still well formed, it
+  # just stops being stable or stops being derived from the value, and nothing
+  # downstream notices.
+  echo "=== placeholder mask test (stable tags, per-field salt, coverage) ==="
+  node test/mask.test.mjs
+
+  # The model-facing password flow: masked reads, scalar reveal values,
+  # placeholder handles, fieldName selection, hidden-field sentinels and the
+  # write guard that keeps a copied projection out of the vault.
+  echo "=== password flow test (masked read / reveal / write guard) ==="
+  node test/secret-flow.test.mjs
+
+  # Log sweep: the redaction contract for on-disk session logs, plus the two
+  # corruption classes a sweep must never reintroduce (a log written as one
+  # zstd frame loses its session; a rewritten tool/call with a stale
+  # assistant-message copy fails the host's replay check), plus the
+  # incrementality guarantees the sweep depends on to stay cheap.
+  echo "=== session log sweep test (redaction + frame layout + incrementality) ==="
+  node test/sweeper.test.mjs
+
+  # The masking-trail index: the numbers the panel's second page shows. It reads
+  # the same logs the sweep rewrites, so it is tested here, beside it. The two
+  # failures worth guarding are silent: counting one mask twice (a repeated
+  # event line, or a superseded log version beside the current one) and
+  # re-decoding a warm log (300 MB on a real machine).
+  echo "=== masking trail index test (counts, dedup, incrementality, states) ==="
+  node test/trail.test.mjs
+
+  # The reverse of the mask: given a placeholder, which entry was it hiding?
+  # Both failures are silent and both are privacy failures, so they sit in the
+  # build: a value with no key that still "resolves", and a reprompt-protected
+  # entry whose tag gets recomputed without the operator clearing the prompt.
+  echo "=== placeholder origin test (tag reverse-lookup, reprompt, key rotation) ==="
+  node test/unmask.test.mjs
+
+  # The gateway half of the same feature: which index the panel gets, and the
+  # rule that an unreadable vault costs the preview but never the row.
+  echo "=== placeholder origin gateway test (cache lifetime, silent misses) ==="
+  node test/trail-origin.test.mjs
+
+  # Session resilience: a failed token refresh may only cost the stored session
+  # when the *server* refused it. Offline, 429 and 5xx must keep it (and must
+  # never drag a two-factor account to the code prompt).
+  echo "=== session resilience test (failed refresh does not delete the session) ==="
+  node test/session-resilience.test.mjs
+
+  # Cross-implementation check against the official Bitwarden CLI. It skips
+  # itself (exit 0) when the CLI or openssl is unavailable.
+  echo "=== official CLI interop test ==="
+  node test/cli-interop.mjs
+
+  # Browser-half test: react is provided by the platform at runtime, so these
+  # are test-only dependencies and the test skips itself when they are absent.
+  if [ ! -d node_modules/react ] || [ ! -d node_modules/react-test-renderer ]; then
+    echo "=== installing browser-half test deps (react, react-test-renderer) ==="
+    npm install --no-save --no-audit --no-fund --loglevel=error --legacy-peer-deps \
+      react@18.3.1 react-test-renderer@18.3.1 >/dev/null 2>&1 || true
+    relink_peers
+  fi
+  echo "=== settings card test (browser half) ==="
+  node test/client-card.test.mjs
+
+  # The transcript row's NATIVE path. The suite above runs against a page that
+  # has only `react` — its loader stub rejects every other require — so it
+  # covers the primitives-free fallback and never the branch a real user hits.
+  # This one loads the HOST's real `@deepseek-ai/dsh-client-ui-primitives`
+  # through test/host-primitives-hooks.mjs and asserts the row renders through
+  # the host's own DisclosureRow.
+  #
+  # DSH_REQUIRE_NATIVE_ROW converts its "no linked peer SDK" SKIP into a
+  # FAILURE: the links exist by this point in the script (link_pkg made them),
+  # so a missing one here means the build lost them — and a silently skipped
+  # suite would report the native row as verified without rendering it once.
+  echo "=== native tool row test (host DisclosureRow) ==="
+  DSH_REQUIRE_NATIVE_ROW=1 node test/native-row.test.mjs
+
+  # The stress suites: cache-chain (warm start, damaged record, account
+  # mismatch), concurrency (sign-out racing an unlock, two accounts sharing a
+  # data dir), malformed payloads (wrong shapes from the server), scale (a vault
+  # several times the size of a real one) and time (clock rollback and jump).
+  # They are slower than the rest and they exist for the failures the hand-
+  # written cases never reach, so they run as part of the build rather than as
+  # something somebody remembers to run.
+  echo "=== stress: cache chain ==="
+  node test/stress-cache-chain.test.mjs
+
+  echo "=== stress: concurrency and races ==="
+  node test/stress-concurrency.test.mjs
+
+  echo "=== stress: malformed payloads ==="
+  node test/stress-malformed.test.mjs
+
+  echo "=== stress: scale ==="
+  node test/stress-scale.test.mjs
+
+  echo "=== stress: clock rollback and jump ==="
+  node test/stress-time.test.mjs
+fi
+
+echo "=== build complete: $ROOT ==="

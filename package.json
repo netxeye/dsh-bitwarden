@@ -1,0 +1,98 @@
+{
+  "name": "dsh-bitwarden",
+  "version": "0.18.0",
+  "description": "Bitwarden / Vaultwarden vault for DeepSeek Harness: real-time sync, entry browser panel, masked reads, TOTP, passkeys and read/write tools. Local fork of dsh-vaultwarden 0.17.6 (MIT) that fixes official-cloud password login for Argon2id accounts; supports Bitwarden cloud (US/EU) and self-hosted Vaultwarden.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/netxeye/dsh-bitwarden.git"
+  },
+  "icon": "icon.svg",
+  "homepage": "https://github.com/netxeye/dsh-bitwarden#readme",
+  "bugs": {
+    "url": "https://github.com/netxeye/dsh-bitwarden/issues"
+  },
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "icon.svg",
+    "assets",
+    "scripts",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "CHANGELOG.md",
+    "FORK.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "bitwarden",
+    "vaultwarden",
+    "credentials",
+    "secrets",
+    "vault",
+    "totp",
+    "sync",
+    "realtime",
+    "websocket"
+  ],
+  "optionalDependencies": {
+    "hash-wasm": "^4.12.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-0 || ^0.1.1-0 || ^0.1.2-0 || ^0.1.3-0 || ^0.1.5-0 || ^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || ^0.2.1-0",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-0 || ^0.1.1-0 || ^0.1.2-0 || ^0.1.3-0 || ^0.1.5-0 || ^0.1.6-0 || ^0.1.7-0 || ^0.2.0-0 || ^0.2.1-0",
+    "@deepseek-ai/schemastery": "^3.18.0 || ^3.18.1-0 || ^3.18.5-0",
+    "@deepseek-ai/cordis": ">=4.0.1-rc.1 <5 || ^4.0.5-0 || ^4.0.6-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "test": "node test/mock-e2e.test.mjs",
+    "preflight": "node scripts/preflight-release.mjs",
+    "verify-release": "node scripts/verify-release.mjs"
+  }
+}
