@@ -1,0 +1,7 @@
+url: https://github.com/netxeye/dsh-bitwarden
+name: netxeye/dsh-bitwarden
+category: security
+description:
+  en: 'Bitwarden / Vaultwarden vault for DSH: an entry browser panel, masked credential reads for the model, TOTP and passkey export, live sync, and read/write tools. Works with Bitwarden cloud (US/EU) and self-hosted Vaultwarden; this fork fixes the official-cloud Argon2id password-login failure of its upstream.'
+  zh: '把 Bitwarden / Vaultwarden 密码库接入 DSH：密码库面板、给模型的脱敏读取、TOTP 与通行密钥导出、实时同步与读写工具；支持官方 Bitwarden 云（US/EU）与自建 Vaultwarden，并修复了上游在官方云 Argon2id 账号上的登录失败。'
+tarball: https://github.com/netxeye/dsh-bitwarden/releases/latest/download/dsh-bitwarden.tgz
